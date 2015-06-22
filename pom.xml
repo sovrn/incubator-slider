@@ -1575,7 +1575,7 @@
       <!-- 2.6 snapshots -->
       <id>branch-2.6</id>
       <properties>
-        <hadoop.version>2.6.0-SNAPSHOT</hadoop.version>
+        <hadoop.version>2.6.0</hadoop.version>
       </properties>
     </profile>
 
