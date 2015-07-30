@@ -21,8 +21,8 @@ package org.apache.slider.server.appmaster.rpc;
 import com.google.common.base.Preconditions;
 import com.google.protobuf.BlockingService;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.retry.RetryPolicies;
 import org.apache.hadoop.io.retry.RetryPolicy;
-import org.apache.hadoop.io.retry.RetryUtils;
 import org.apache.hadoop.ipc.ProtobufRpcEngine;
 import org.apache.hadoop.ipc.ProtocolProxy;
 import org.apache.hadoop.ipc.RPC;
@@ -147,14 +147,7 @@ public class RpcBinder {
     Class<SliderClusterProtocolPB> sliderClusterAPIClass =
         registerSliderAPI(conf);
 
-    final RetryPolicy retryPolicy =
-        RetryUtils.getDefaultRetryPolicy(
-            conf,
-            KEY_IPC_CLIENT_RETRY_POLICY_ENABLED,
-            IPC_CLIENT_RETRY_POLICY_ENABLED_DEFAULT,
-            KEY_IPC_CLIENT_RETRY_POLICY_SPEC,
-            IPC_CLIENT_RETRY_POLICY_SPEC_DEFAULT,
-            ServiceNotReadyException.class);
+    final RetryPolicy retryPolicy = RetryPolicies.TRY_ONCE_THEN_FAIL;
     log.debug("Connecting to Slider AM at {}", addr);
     ProtocolProxy<SliderClusterProtocolPB> protoProxy =
         RPC.getProtocolProxy(sliderClusterAPIClass,
@@ -199,37 +192,41 @@ public class RpcBinder {
     timeout.start();
     Exception exception = null;
     YarnApplicationState state = null;
-    while (application != null &&
-           (state = application.getYarnApplicationState()).equals(
-               YarnApplicationState.RUNNING)) {
-
-      try {
-        return getProxy(conf, application, rpcTimeout);
-      } catch (IOException e) {
-        if (connectTimeout <= 0 || timeout.getLimitExceeded()) {
-          throw e;
+    try {
+      while (application != null &&
+             (state = application.getYarnApplicationState()).equals(
+                 YarnApplicationState.RUNNING)) {
+  
+        try {
+          return getProxy(conf, application, rpcTimeout);
+        } catch (IOException e) {
+          if (connectTimeout <= 0 || timeout.getLimitExceeded()) {
+            throw e;
+          }
+          exception = e;
+        } catch (YarnException e) {
+          if (connectTimeout <= 0 || timeout.getLimitExceeded()) {
+            throw e;
+          }
+          exception = e;
         }
-        exception = e;
-      } catch (YarnException e) {
-        if (connectTimeout <= 0 || timeout.getLimitExceeded()) {
-          throw e;
-        }
-        exception = e;
+        //at this point: app failed to work
+        log.debug("Could not connect to {}. Waiting for getting the latest AM address...",
+                  appId);
+        Thread.sleep(1000);
+        //or get the app report
+        application =
+          rmClient.getApplicationReport(
+              GetApplicationReportRequest.newInstance(appId)).getApplicationReport();
       }
-      //at this point: app failed to work
-      log.debug("Could not connect to {}. Waiting for getting the latest AM address...",
-                appId);
-      Thread.sleep(1000);
-      //or get the app report
-      application =
-        rmClient.getApplicationReport(
-            GetApplicationReportRequest.newInstance(appId)).getApplicationReport();
+      //get here if the app is no longer running. Raise a specific
+      //exception but init it with the previous failure
+      throw new BadClusterStateException(
+                              exception,
+                              ErrorStrings.E_FINISHED_APPLICATION, appId, state );
+    } finally {
+      timeout.close();
     }
-    //get here if the app is no longer running. Raise a specific
-    //exception but init it with the previous failure
-    throw new BadClusterStateException(
-                            exception,
-                            ErrorStrings.E_FINISHED_APPLICATION, appId, state );
   }
 
   /**
